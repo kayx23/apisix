@@ -45,10 +45,18 @@ routes:
         uri: ${{var_test_proxy_rewrite_uri:=/apisix/nginx_status}}
     upstream:
       nodes:
-        "127.0.0.1:9091": 1
+        ${{var_httpbin_upstream}}: 1
       type: roundrobin
 #END
 ' > conf/apisix.yaml
+
+# check if var_httpbin_upstream can be resolve
+var_httpbin_upstream=httpbin.org
+
+if ! grep "env var_httpbin_upstream=httpbin;" conf/nginx.conf > /dev/null; then
+    echo "failed: failed to resolve variables var_httpbin_upstream"
+    exit 1
+fi
 
 # check for resolve variables
 var_test_path=/test make init
