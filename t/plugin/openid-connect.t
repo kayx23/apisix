@@ -1321,7 +1321,6 @@ x-userinfo: ey.*
                                 "discovery": "http://127.0.0.1:8080/realms/University/.well-known/openid-configuration",
                                 "realm": "University",
                                 "bearer_only": true,
-                                "access_token_in_authorization_header": true,
                                 "set_userinfo_header": true,
                                 "use_jwks": true,
                                 "redirect_uri": "http://localhost:3000",
