@@ -43,7 +43,7 @@ local schema = {
             maxLength = 1024
         },
     },
-    required = {"query"},
+    required = { "query" },
 }
 
 local plugin_name = "degraphql"
@@ -72,7 +72,6 @@ function _M.check_schema(conf)
     end
     return true
 end
-
 
 local function fetch_post_variables(conf)
     local req_body, err = core.request.get_body()
@@ -155,6 +154,5 @@ function _M.access(conf, ctx)
         core.request.set_uri_args(ctx, new_body)
     end
 end
-
 
 return _M

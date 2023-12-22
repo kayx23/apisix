@@ -174,7 +174,7 @@ true
                                 "discovery": "http://127.0.0.1:8080/realms/University/.well-known/openid-configuration",
                                 "realm": "University",
                                 "client_id": "course_management",
-                                "client_secret": "d1ec69e9-55d2-4109-a3ea-befa071579d5",
+                                "client_secret": "d1ec69e9random-4109-a3ea-befa071579d5",
                                 "redirect_uri": "http://127.0.0.1:]] .. ngx.var.server_port .. [[/authenticated",
                                 "ssl_verify": false,
                                 "timeout": 10,
@@ -378,7 +378,7 @@ x-real-ip: 127.0.0.1
                         "plugins": {
                             "openid-connect": {
                                 "client_id": "kbyuFDidLLm280LIwVFiazOqjO3ty8KH",
-                                "client_secret": "60Op4HFM0I8ajz0WdiStAbziZ-VFQttXuxixHHs2R7r7-CW8GR79l-mmLqMhc-Sa",
+                                "client_secret": "60Op4HFM0I8ajz0WdiStAbziZ-randomuxixHHs2R7r7-CW8GR79l-mmLqMhc-Sa",
                                 "discovery": "https://samples.auth0.com/.well-known/openid-configuration",
                                 "redirect_uri": "https://iresty.com",
                                 "ssl_verify": false,
