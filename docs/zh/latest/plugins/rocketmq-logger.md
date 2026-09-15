@@ -5,7 +5,7 @@ keywords:
   - API 网关
   - Plugin
   - RocketMQ
-description: rocketmq-logger 插件将请求和响应日志以 JSON 对象批量推送到 RocketMQ 集群，支持自定义日志格式以增强数据管理能力。
+description: rocketmq-logger 插件将 APISIX 请求和响应日志批量发送到 Apache RocketMQ，支持结构化日志、原始请求和自定义格式。
 ---
 
 <!--
@@ -33,7 +33,7 @@ description: rocketmq-logger 插件将请求和响应日志以 JSON 对象批量
 
 ## 描述
 
-`rocketmq-logger` 插件将请求和响应日志以 JSON 对象批量推送到 RocketMQ 集群，并支持自定义日志格式。
+`rocketmq-logger` 插件将请求和响应日志批量发送到 Apache RocketMQ，支持默认结构化日志格式、原始 HTTP 请求格式和自定义日志字段。
 
 ## 属性
 
@@ -80,40 +80,46 @@ description: rocketmq-logger 插件将请求和响应日志以 JSON 对象批量
 
 ## 使用示例
 
-以下示例演示如何在不同场景下配置 `rocketmq-logger` 插件。
+以下示例介绍 `rocketmq-logger` 插件的常见日志记录场景。
 
-请先启动一个示例 RocketMQ 集群：
+首先，启动 RocketMQ NameServer 和 Broker。APISIX 与 RocketMQ 容器必须使用同一个 Docker 网络，以便 APISIX 通过容器名称访问 NameServer。
+
+将 `APISIX_CONTAINER` 设置为正在运行的 APISIX 容器名称。创建专用 Docker 网络，并将 APISIX 连接到该网络：
+
+```shell
+export APISIX_CONTAINER=replace-with-apisix-container-name
+
+docker network create apisix-rocketmq-net
+docker network connect apisix-rocketmq-net "$APISIX_CONTAINER"
+```
+
+创建 Docker Compose 文件：
 
 ```yaml title="docker-compose.yml"
-version: "3"
-
 services:
-  rocketmq_namesrv:
-    image: apacherocketmq/rocketmq:4.6.0
-    container_name: rmqnamesrv
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.5.0
+    container_name: rocketmq-namesrv
     restart: unless-stopped
-    ports:
-      - "9876:9876"
-    command: sh mqnamesrv
+    command: ["nameserver"]
     networks:
-      rocketmq_net:
+      - apisix-rocketmq-net
 
-  rocketmq_broker:
-    image: apacherocketmq/rocketmq:4.6.0
-    container_name: rmqbroker
+  rocketmq-broker:
+    image: apache/rocketmq:5.5.0
+    container_name: rocketmq-broker
     restart: unless-stopped
-    ports:
-      - "10909:10909"
-      - "10911:10911"
-      - "10912:10912"
     depends_on:
-      - rocketmq_namesrv
-    command: sh mqbroker -n rmqnamesrv:9876 -c ../conf/broker.conf
+      - rocketmq-namesrv
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command: ["broker", "-n", "rocketmq-namesrv:9876"]
     networks:
-      rocketmq_net:
+      - apisix-rocketmq-net
 
 networks:
-  rocketmq_net:
+  apisix-rocketmq-net:
+    external: true
 ```
 
 启动容器：
@@ -122,28 +128,31 @@ networks:
 docker compose up -d
 ```
 
-稍等片刻，nameserver 和 broker 应相继启动。
+等待 Broker 向 NameServer 完成注册：
+
+```shell
+until docker exec rocketmq-namesrv sh mqadmin clusterList \
+  -n rocketmq-namesrv:9876 2>/dev/null | grep -q "DefaultCluster"; do
+  sleep 2
+done
+```
 
 创建 `TopicTest` topic：
 
 ```shell
-docker exec -i rmqnamesrv rm /home/rocketmq/rocketmq-4.6.0/conf/tools.yml
-docker exec -i rmqnamesrv /home/rocketmq/rocketmq-4.6.0/bin/mqadmin updateTopic -n rmqnamesrv:9876 -t TopicTest -c DefaultCluster
+docker exec rocketmq-namesrv sh mqadmin updateTopic \
+  -n rocketmq-namesrv:9876 \
+  -t TopicTest \
+  -c DefaultCluster
 ```
 
-等待来自已配置 RocketMQ topic 的消息：
+在以下示例中发送请求后，查看 `TopicTest` 中的消息：
 
 ```shell
-docker run -it --name rocketmq_consumer -e NAMESRV_ADDR=localhost:9876 --net host apacherocketmq/rocketmq:4.6.0 sh tools.sh org.apache.rocketmq.example.quickstart.Consumer
+docker exec rocketmq-namesrv sh mqadmin printMsg \
+  -n rocketmq-namesrv:9876 \
+  -t TopicTest
 ```
-
-稍等片刻，消费者应启动并监听来自 APISIX 的消息：
-
-```text
-Consumer Started.
-```
-
-打开新的终端会话，继续以下操作。
 
 :::note
 
@@ -155,21 +164,20 @@ admin_key=$(yq '.deployment.admin.admin_key[0].key' conf/config.yaml | sed 's/"/
 
 :::
 
-### 以不同元日志格式记录日志
+### 对比结构化日志和原始请求日志
 
-以下示例演示如何在路由上启用 `rocketmq-logger` 插件，记录客户端请求并推送日志到 RocketMQ，同时了解 `default` 和 `origin` 两种元日志格式的区别。
+`default` 元数据格式发送结构化 JSON 日志条目，`origin` 格式则发送原始 HTTP 请求。以下示例分别配置这两种格式，以便对比输出结果。
 
 创建带 `rocketmq-logger` 的路由，将 `meta_format` 设为 `default`，将 `batch_max_size` 设为 1 以立即发送日志条目：
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PUT \
   -H "X-API-KEY: ${admin_key}" \
   -d '{
-    "id": "rocketmq-logger-route",
     "uri": "/anything",
     "plugins": {
       "rocketmq-logger": {
-        "nameserver_list": [ "127.0.0.1:9876" ],
+        "nameserver_list": [ "rocketmq-namesrv:9876" ],
         "topic": "TopicTest",
         "key": "key1",
         "timeout": 30,
@@ -192,13 +200,13 @@ curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
 curl -i "http://127.0.0.1:9080/anything"
 ```
 
-您应看到类似如下的日志条目：
+查看 `TopicTest`。消息体中应包含类似如下的日志条目：
 
 ```json
 {
   "client_ip": "127.0.0.1",
   "upstream": "34.197.122.172:80",
-  "start_time": 1744727400000,
+  "start_time": 1789377954622,
   "request": {
     "headers": {
       "host": "127.0.0.1:9080",
@@ -220,15 +228,15 @@ curl -i "http://127.0.0.1:9080/anything"
     "headers": {
       "content-length": "391",
       "connection": "close",
-      "date": "Tue, 15 Apr 2025 14:30:00 GMT",
-      "server": "APISIX/3.15.0",
+      "date": "Mon, 14 Sep 2026 09:25:54 GMT",
+      "server": "APISIX/3.18.0",
       "content-type": "application/json"
     },
     "status": 200
   },
   "server": {
     "hostname": "apisix",
-    "version": "3.15.0"
+    "version": "3.18.0"
   },
   "service_id": ""
 }
@@ -254,7 +262,7 @@ curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PATCH 
 curl -i "http://127.0.0.1:9080/anything"
 ```
 
-您应看到以原始 HTTP 请求格式呈现的日志条目：
+再次查看该 Topic。新消息体中应包含原始 HTTP 请求格式的日志条目：
 
 ```text
 GET /anything HTTP/1.1
@@ -263,25 +271,20 @@ user-agent: curl/8.6.0
 accept: */*
 ```
 
-### 通过插件元数据记录请求和响应头
+### 通过插件元数据自定义日志字段
 
-以下示例演示如何使用[插件元数据](../terminology/plugin-metadata.md)和 NGINX 变量自定义日志格式，记录请求和响应中的特定头部信息。
-
-在 APISIX 中，[插件元数据](../terminology/plugin-metadata.md)用于配置同一插件所有实例的公共元数据字段。当插件在多个资源上启用并需要统一更新元数据字段时非常有用。
-
-注意：若希望通过插件元数据自定义日志格式，`meta_format` 必须设为 `default`。若 `meta_format` 设为 `origin`，日志条目将保持 `origin` 格式。
+使用[插件元数据](../terminology/plugin-metadata.md)为所有 `rocketmq-logger` 实例应用统一的日志格式。以下配置使用 NGINX 变量记录请求头和响应头。请将 `meta_format` 设为 `default`，因为插件元数据不会自定义 `origin` 格式的日志。
 
 首先，创建带 `rocketmq-logger` 的路由，将 `meta_format` 设为 `default`，`batch_max_size` 设为 1 以立即发送日志条目：
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PUT \
   -H "X-API-KEY: ${admin_key}" \
   -d '{
-    "id": "rocketmq-logger-route",
     "uri": "/anything",
     "plugins": {
       "rocketmq-logger": {
-        "nameserver_list": [ "127.0.0.1:9876" ],
+        "nameserver_list": [ "rocketmq-namesrv:9876" ],
         "topic": "TopicTest",
         "key": "key1",
         "timeout": 30,
@@ -320,7 +323,7 @@ curl "http://127.0.0.1:9180/apisix/admin/plugin_metadata/rocketmq-logger" -X PUT
 curl -i "http://127.0.0.1:9080/anything" -H "env: dev"
 ```
 
-您应看到类似如下的日志条目：
+查看该 Topic。消息体中应包含类似如下的日志条目：
 
 ```json
 {
@@ -329,25 +332,24 @@ curl -i "http://127.0.0.1:9080/anything" -H "env: dev"
   "resp_content_type": "application/json",
   "route_id": "rocketmq-logger-route",
   "env": "dev",
-  "@timestamp": "2025-04-15T14:30:00+00:00"
+  "@timestamp": "2026-09-14T09:28:24+00:00"
 }
 ```
 
 ### 按条件记录请求体
 
-以下示例演示如何按条件记录请求体。
+以下示例仅在 `log_body` 查询参数为 `yes` 时记录请求体。
 
 创建如下带 `rocketmq-logger` 的路由，仅当 URL 查询参数 `log_body` 为 `yes` 时才记录请求体：
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PUT \
   -H "X-API-KEY: ${admin_key}" \
   -d '{
-    "id": "rocketmq-logger-route",
     "uri": "/anything",
     "plugins": {
       "rocketmq-logger": {
-        "nameserver_list": [ "127.0.0.1:9876" ],
+        "nameserver_list": [ "rocketmq-namesrv:9876" ],
         "topic": "TopicTest",
         "key": "key1",
         "timeout": 30,
@@ -372,7 +374,7 @@ curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
 curl -i "http://127.0.0.1:9080/anything?log_body=yes" -X POST -d '{"env": "dev"}'
 ```
 
-您应看到日志中包含请求体：
+查看该 Topic。消息体中应包含请求体：
 
 ```json
 {

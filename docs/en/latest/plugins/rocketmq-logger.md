@@ -5,7 +5,7 @@ keywords:
   - API Gateway
   - Plugin
   - RocketMQ Logger
-description: The rocketmq-logger Plugin pushes request and response logs as JSON objects to RocketMQ clusters in batches, allowing for customizable log formats to enhance data management.
+description: The rocketmq-logger Plugin sends APISIX request and response logs to Apache RocketMQ in batches with structured, original-request, or customized formats.
 ---
 <!--
 #
@@ -32,7 +32,7 @@ description: The rocketmq-logger Plugin pushes request and response logs as JSON
 
 ## Description
 
-The `rocketmq-logger` Plugin pushes request and response logs as JSON objects to RocketMQ clusters in batches and supports the customization of log formats.
+The `rocketmq-logger` Plugin sends request and response logs to Apache RocketMQ in batches. It supports the default structured log format, the original HTTP request format, and customized log fields.
 
 ## Attributes
 
@@ -81,40 +81,46 @@ Configuring the Plugin metadata is global in scope. This means that it will take
 
 ## Examples
 
-The examples below demonstrate how you can configure the `rocketmq-logger` Plugin for different scenarios.
+The examples below configure the `rocketmq-logger` Plugin for common logging scenarios.
 
-To follow along the examples, start a sample RocketMQ cluster:
+To follow the examples, start a RocketMQ NameServer and broker. The APISIX and RocketMQ containers must share a Docker network so that APISIX can reach the NameServer by container name.
+
+Set `APISIX_CONTAINER` to the name of the running APISIX container. Create a dedicated Docker network and connect APISIX to it:
+
+```shell
+export APISIX_CONTAINER=replace-with-apisix-container-name
+
+docker network create apisix-rocketmq-net
+docker network connect apisix-rocketmq-net "$APISIX_CONTAINER"
+```
+
+Create the Docker Compose file:
 
 ```yaml title="docker-compose.yml"
-version: "3"
-
 services:
-  rocketmq_namesrv:
-    image: apacherocketmq/rocketmq:4.6.0
-    container_name: rmqnamesrv
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.5.0
+    container_name: rocketmq-namesrv
     restart: unless-stopped
-    ports:
-      - "9876:9876"
-    command: sh mqnamesrv
+    command: ["nameserver"]
     networks:
-      rocketmq_net:
+      - apisix-rocketmq-net
 
-  rocketmq_broker:
-    image: apacherocketmq/rocketmq:4.6.0
-    container_name: rmqbroker
+  rocketmq-broker:
+    image: apache/rocketmq:5.5.0
+    container_name: rocketmq-broker
     restart: unless-stopped
-    ports:
-      - "10909:10909"
-      - "10911:10911"
-      - "10912:10912"
     depends_on:
-      - rocketmq_namesrv
-    command: sh mqbroker -n rmqnamesrv:9876 -c ../conf/broker.conf
+      - rocketmq-namesrv
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command: ["broker", "-n", "rocketmq-namesrv:9876"]
     networks:
-      rocketmq_net:
+      - apisix-rocketmq-net
 
 networks:
-  rocketmq_net:
+  apisix-rocketmq-net:
+    external: true
 ```
 
 Start containers:
@@ -123,28 +129,31 @@ Start containers:
 docker compose up -d
 ```
 
-In a few seconds, the name server and broker should start.
+Wait for the broker to register with the NameServer:
+
+```shell
+until docker exec rocketmq-namesrv sh mqadmin clusterList \
+  -n rocketmq-namesrv:9876 2>/dev/null | grep -q "DefaultCluster"; do
+  sleep 2
+done
+```
 
 Create the `TopicTest` topic:
 
 ```shell
-docker exec -i rmqnamesrv rm /home/rocketmq/rocketmq-4.6.0/conf/tools.yml
-docker exec -i rmqnamesrv /home/rocketmq/rocketmq-4.6.0/bin/mqadmin updateTopic -n rmqnamesrv:9876 -t TopicTest -c DefaultCluster
+docker exec rocketmq-namesrv sh mqadmin updateTopic \
+  -n rocketmq-namesrv:9876 \
+  -t TopicTest \
+  -c DefaultCluster
 ```
 
-Wait for messages in the configured RocketMQ topic:
+After sending a request in the following examples, inspect the messages in `TopicTest`:
 
 ```shell
-docker run -it --name rocketmq_consumer -e NAMESRV_ADDR=localhost:9876 --net host apacherocketmq/rocketmq:4.6.0 sh tools.sh org.apache.rocketmq.example.quickstart.Consumer
+docker exec rocketmq-namesrv sh mqadmin printMsg \
+  -n rocketmq-namesrv:9876 \
+  -t TopicTest
 ```
-
-In a few seconds, the consumer should start and listen for messages from APISIX:
-
-```text
-Consumer Started.
-```
-
-Open a new terminal session for the following steps working with APISIX.
 
 :::note
 
@@ -156,21 +165,20 @@ admin_key=$(yq '.deployment.admin.admin_key[0].key' conf/config.yaml | sed 's/"/
 
 :::
 
-### Log in Different Meta Log Formats
+### Compare Structured and Original Request Logs
 
-The following example demonstrates how you can enable the `rocketmq-logger` Plugin on a Route, which logs client requests to the Route and pushes logs to RocketMQ. You will also understand the differences between the `default` and `origin` meta log formats.
+The `default` metadata format sends a structured JSON log entry, while the `origin` format sends the original HTTP request. This example configures both formats so that you can compare their output.
 
 Create a Route with `rocketmq-logger` with `meta_format` set to the `default` log format and `batch_max_size` set to 1 to send the log entry immediately:
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PUT \
   -H "X-API-KEY: ${admin_key}" \
   -d '{
-    "id": "rocketmq-logger-route",
     "uri": "/anything",
     "plugins": {
       "rocketmq-logger": {
-        "nameserver_list": [ "127.0.0.1:9876" ],
+        "nameserver_list": [ "rocketmq-namesrv:9876" ],
         "topic": "TopicTest",
         "key": "key1",
         "timeout": 30,
@@ -193,13 +201,13 @@ Send a request to the Route to generate a log entry:
 curl -i "http://127.0.0.1:9080/anything"
 ```
 
-You should see a log entry similar to the following:
+Inspect `TopicTest`. The message body should contain a log entry similar to the following:
 
 ```json
 {
   "client_ip": "127.0.0.1",
   "upstream": "34.197.122.172:80",
-  "start_time": 1744727400000,
+  "start_time": 1789377954622,
   "request": {
     "headers": {
       "host": "127.0.0.1:9080",
@@ -221,15 +229,15 @@ You should see a log entry similar to the following:
     "headers": {
       "content-length": "391",
       "connection": "close",
-      "date": "Tue, 15 Apr 2025 14:30:00 GMT",
-      "server": "APISIX/3.15.0",
+      "date": "Mon, 14 Sep 2026 09:25:54 GMT",
+      "server": "APISIX/3.18.0",
       "content-type": "application/json"
     },
     "status": 200
   },
   "server": {
     "hostname": "apisix",
-    "version": "3.15.0"
+    "version": "3.18.0"
   },
   "service_id": ""
 }
@@ -255,7 +263,7 @@ Send a request to the Route again to generate a new log entry:
 curl -i "http://127.0.0.1:9080/anything"
 ```
 
-You should see a log entry in the raw HTTP request format:
+Inspect the topic again. The new message body should contain the request in its original HTTP format:
 
 ```text
 GET /anything HTTP/1.1
@@ -264,25 +272,20 @@ user-agent: curl/8.6.0
 accept: */*
 ```
 
-### Log Request and Response Headers With Plugin Metadata
+### Customize Log Fields With Plugin Metadata
 
-The following example demonstrates how you can customize log format using [plugin metadata](../terminology/plugin-metadata.md) and NGINX variables to log specific headers from request and response.
-
-In APISIX, [plugin metadata](../terminology/plugin-metadata.md) is used to configure the common metadata fields of all Plugin instances of the same Plugin. It is useful when a Plugin is enabled across multiple resources and requires a universal update to their metadata fields.
-
-Note that customizing log format with Plugin metadata requires `meta_format` to be set to `default`. If `meta_format` is set to `origin`, the log entries will remain in `origin` format.
+Use [plugin metadata](../terminology/plugin-metadata.md) to apply a common log format to every `rocketmq-logger` instance. The following configuration uses NGINX variables to record a request header and a response header. Set `meta_format` to `default` because Plugin metadata does not customize logs in the `origin` format.
 
 First, create a Route with `rocketmq-logger` with `meta_format` set to `default` and `batch_max_size` set to 1 to send the log entry immediately:
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PUT \
   -H "X-API-KEY: ${admin_key}" \
   -d '{
-    "id": "rocketmq-logger-route",
     "uri": "/anything",
     "plugins": {
       "rocketmq-logger": {
-        "nameserver_list": [ "127.0.0.1:9876" ],
+        "nameserver_list": [ "rocketmq-namesrv:9876" ],
         "topic": "TopicTest",
         "key": "key1",
         "timeout": 30,
@@ -321,7 +324,7 @@ Send a request to the Route with the `env` header:
 curl -i "http://127.0.0.1:9080/anything" -H "env: dev"
 ```
 
-You should see a log entry similar to the following:
+Inspect the topic. The message body should contain a log entry similar to the following:
 
 ```json
 {
@@ -330,25 +333,24 @@ You should see a log entry similar to the following:
   "resp_content_type": "application/json",
   "route_id": "rocketmq-logger-route",
   "env": "dev",
-  "@timestamp": "2025-04-15T14:30:00+00:00"
+  "@timestamp": "2026-09-14T09:28:24+00:00"
 }
 ```
 
 ### Log Request Bodies Conditionally
 
-The following example demonstrates how you can conditionally log request body.
+The following example records the request body only when the `log_body` query parameter is `yes`.
 
 Create a Route with `rocketmq-logger` as follows, enabling request body logging only when the URL query string `log_body` is `yes`:
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/routes" -X PUT \
+curl "http://127.0.0.1:9180/apisix/admin/routes/rocketmq-logger-route" -X PUT \
   -H "X-API-KEY: ${admin_key}" \
   -d '{
-    "id": "rocketmq-logger-route",
     "uri": "/anything",
     "plugins": {
       "rocketmq-logger": {
-        "nameserver_list": [ "127.0.0.1:9876" ],
+        "nameserver_list": [ "rocketmq-namesrv:9876" ],
         "topic": "TopicTest",
         "key": "key1",
         "timeout": 30,
@@ -373,7 +375,7 @@ Send a request to the Route with a URL query string satisfying the condition:
 curl -i "http://127.0.0.1:9080/anything?log_body=yes" -X POST -d '{"env": "dev"}'
 ```
 
-You should see the request body logged:
+Inspect the topic. The message body should include the request body:
 
 ```json
 {
