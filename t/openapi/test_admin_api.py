@@ -77,6 +77,16 @@ class ContractValidationTest(unittest.TestCase):
         document['paths']['/apisix/admin/stream_routes/{id}']['patch'] = {}
         self.assertTrue(validator.validate_source(document, ROOT))
 
+    def test_malformed_operation_id(self):
+        document = deepcopy(self.document)
+        document['paths']['/apisix/admin/stream_routes/{id}']['get']['operationId'] = 'getId]'
+        self.assertTrue(validator.validate(document, self.versions))
+
+    def test_missing_collection_put(self):
+        document = deepcopy(self.document)
+        del document['paths']['/apisix/admin/routes']['put']
+        self.assertTrue(validator.validate_source(document, ROOT))
+
 
 if __name__ == '__main__':
     unittest.main()

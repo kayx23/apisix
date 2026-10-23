@@ -20,8 +20,9 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -165,7 +166,7 @@ def validate(document, versions):
             if not op.get('responses'):
                 errors.append(f'{location}: responses must be non-empty')
             op_id = op.get('operationId')
-            if not op_id or op_id in ids:
+            if not isinstance(op_id, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', op_id) or op_id in ids:
                 errors.append(f'{location}: missing or duplicate operationId {op_id!r}')
             ids.add(op_id)
             params = {}
@@ -188,6 +189,26 @@ def validate(document, versions):
                     for media, content in entry.get('content', {}).items():
                         if 'schema' not in content:
                             errors.append(f'{location} {field} {media}: missing schema')
+
+            for sample in op.get('x-codeSamples', []):
+                if sample.get('lang', '').lower() != 'curl':
+                    continue
+                try:
+                    args = shlex.split(sample['source'])
+                    url = next(x for x in args if x.startswith(('http://', 'https://')))
+                    expected_path = re.sub(r'{[^}]+}', r'[^/]+', path)
+                    if not re.fullmatch(expected_path, urlsplit(url).path):
+                        errors.append(f'{location}: cURL URL does not match operation')
+                    actual_method = args[args.index('-X') + 1].lower() if '-X' in args else 'get'
+                    if actual_method != method:
+                        errors.append(f'{location}: cURL method does not match operation')
+                    for flag in ('-d', '--data', '--data-raw'):
+                        if flag in args:
+                            body = json.loads(args[args.index(flag) + 1])
+                            schema = dereference(document, op['requestBody'])['content']['application/json']['schema']
+                            check_value(schema, body, location + '/curl')
+                except (ValueError, KeyError, StopIteration) as exc:
+                    errors.append(f'{location}: invalid cURL sample: {exc}')
     return errors
 
 
@@ -285,6 +306,42 @@ def validate_source(document, root):
         expected = {'get', 'put', 'post', 'patch', 'delete'} - unsupported
         if actual != expected:
             errors.append(f'{resource}: documented methods {sorted(actual)} != {sorted(expected)}')
+
+    # Resource.put accepts a body ID when the canonical item URL is omitted.
+    expected_ops = set()
+    for resource, module in modules.items():
+        if resource == 'credentials':
+            base = '/apisix/admin/consumers/{username}/credentials'
+        else:
+            base = '/apisix/admin/' + resource
+        text = (root / f'apisix/admin/{module}.lua').read_text()
+        match = re.search(r'unsupported_methods\s*=\s*{([^}]+)}', text)
+        unsupported = set(re.findall(r'"(\w+)"', match.group(1))) if match else set()
+        suffix = '/{username}' if resource == 'consumers' else '/{plugin_name}' if resource == 'plugin_metadata' else '/{secret_type}/{id}' if resource == 'secrets' else '/{id}'
+        item = base + suffix
+        expected_ops.update([(base, 'get'), (item, 'get'), (item, 'put'), (item, 'delete')])
+        if resource not in ('secrets', 'plugin_metadata'):
+            expected_ops.add((base, 'put'))
+        if 'post' not in unsupported:
+            expected_ops.add((base, 'post'))
+        if 'patch' not in unsupported:
+            expected_ops.update([(item, 'patch'), (item + '/{sub_path}', 'patch')])
+    expected_ops.add(('/apisix/admin/secrets/{secret_type}', 'get'))
+    expected_ops.update({
+        ('/apisix/admin/plugins/{plugin_name}', 'get'),
+        ('/apisix/admin/schema/plugins/{plugin_name}', 'get'),
+        ('/apisix/admin/plugins', 'get'), ('/apisix/admin/plugins/list', 'get'),
+        ('/apisix/admin/plugins/reload', 'put'),
+        ('/apisix/admin/schema/{resource}', 'get'),
+        ('/apisix/admin/schema/validate/{resource}', 'post'),
+        ('/apisix/admin', 'head'), ('/apisix/admin/configs', 'get'),
+        ('/apisix/admin/configs', 'put'), ('/apisix/admin/configs', 'head'),
+        ('/apisix/admin/configs/validate', 'post'),
+    })
+    actual_ops = {(path, method) for path, item in document['paths'].items()
+                  for method in METHODS & item.keys()}
+    if actual_ops != expected_ops:
+        errors.append(f'operation surface differs: missing {sorted(expected_ops - actual_ops)}, extra {sorted(actual_ops - expected_ops)}')
     return errors
 
 
